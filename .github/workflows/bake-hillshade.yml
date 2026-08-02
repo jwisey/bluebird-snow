@@ -1,0 +1,57 @@
+name: Bake Alps hi-res hillshade
+
+on:
+  workflow_dispatch:
+    inputs:
+      maxzoom:
+        description: "Max tile zoom (12 default; 13 sharper but ~4x bigger)"
+        required: false
+        default: "12"
+      exaggeration:
+        description: "Shading vertical exaggeration"
+        required: false
+        default: "1.4"
+
+permissions:
+  contents: write
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System deps (GDAL)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin libgdal-dev
+
+      - name: Install pmtiles CLI
+        run: |
+          curl -L -o pmtiles.tar.gz https://github.com/protomaps/go-pmtiles/releases/download/v1.22.1/go-pmtiles_1.22.1_Linux_x86_64.tar.gz
+          tar -xzf pmtiles.tar.gz pmtiles
+          sudo mv pmtiles /usr/local/bin/
+          pmtiles version
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Python deps
+        run: |
+          pip install rasterio mercantile tqdm supermercado shapely
+          # rio-mbtiles pins shapely~=1.7.0 (no py3.11 wheel, fails to build)
+          pip install --no-deps rio-mbtiles
+
+      - name: Bake hillshade PMTiles
+        env:
+          HS_MAX_ZOOM: "${{ github.event.inputs.maxzoom }}"
+          HS_Z: "${{ github.event.inputs.exaggeration }}"
+        run: python bake_hillshade.py
+
+      - name: Publish to the 'terrain' release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: terrain
+          name: Alps terrain texture
+          files: alps-hillshade-hires.pmtiles

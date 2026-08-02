@@ -1,0 +1,13 @@
+# NOTE: rio-mbtiles is installed separately with --no-deps in the workflows.
+# It pins shapely~=1.7.0, which has no wheel for Python 3.11 and fails to build
+# from source — `pip install -r requirements.txt` with rio-mbtiles in it dies.
+requests
+numpy
+scipy
+rasterio
+pillow
+elevation
+mercantile
+tqdm
+supermercado
+shapely

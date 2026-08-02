@@ -1,0 +1,85 @@
+name: Bake Alps snow tiles
+
+on:
+  schedule:
+    - cron: "0 6 * * *"      # daily 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: "Season backfill START:END:STEP (e.g. 2024-12-01:2025-04-15:7). Blank = daily."
+        required: false
+        default: ""
+      date:
+        description: "Pin a single date (YYYY-MM-DD). Blank = today-6d."
+        required: false
+        default: ""
+      dem_zoom:
+        description: "Terrarium DEM zoom (9 = 215 m/px, 10 = 108 m/px & 4x the tiles)"
+        required: false
+        default: "9"
+      max_zoom:
+        description: "Max tile zoom"
+        required: false
+        default: "11"
+
+permissions:
+  contents: write              # to publish the PMTiles as a release asset
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System deps (GDAL)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin libgdal-dev
+
+      - name: Install pmtiles CLI
+        run: |
+          curl -L -o pmtiles.tar.gz https://github.com/protomaps/go-pmtiles/releases/download/v1.22.1/go-pmtiles_1.22.1_Linux_x86_64.tar.gz
+          tar -xzf pmtiles.tar.gz pmtiles
+          sudo mv pmtiles /usr/local/bin/
+          pmtiles version
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Python deps
+        run: |
+          pip install -r requirements.txt
+          # rio-mbtiles pins shapely~=1.7.0 which has no py3.11 wheel and fails to
+          # build; its deps are already satisfied above, so install it without them.
+          pip install --no-deps rio-mbtiles
+
+      - name: Smoke test (offline, synthetic data — catches breakage before the real bake)
+        env: { SNOW_SELFTEST: "1", SNOW_DATE: "2024-02-15", SNOW_MAX_ZOOM: "8" }
+        run: |
+          mkdir -p _smoke && cd _smoke && cp ../bake_snow.py .
+          python bake_snow.py
+          test -s alps-snow.pmtiles && echo "smoke OK"
+
+      - name: Pull yesterday's snow state (for accumulation)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release download snow -p snow-state.tif --clobber || echo "no prior state yet"
+
+      - name: Bake snow PMTiles
+        env:
+          SNOW_BACKFILL: "${{ github.event.inputs.backfill }}"
+          SNOW_DATE: "${{ github.event.inputs.date }}"
+          DEM_ZOOM: "${{ github.event.inputs.dem_zoom || '9' }}"
+          SNOW_MAX_ZOOM: "${{ github.event.inputs.max_zoom || '11' }}"
+        run: python bake_snow.py
+
+      - name: Publish PMTiles to the 'snow' release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: snow
+          name: Alps snow tiles
+          files: |
+            alps-snow.pmtiles
+            alps-snow-*.pmtiles
+            snow-manifest.json
+            snow-state.tif

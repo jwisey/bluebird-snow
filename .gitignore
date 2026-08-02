@@ -1,0 +1,9 @@
+__pycache__/
+dem/
+*.tif
+*.vrt
+*.mbtiles
+*.pmtiles
+preview-*.png
+snow-manifest.json
+_smoke/
