@@ -14,7 +14,7 @@ Env knobs:
 """
 import os, math, subprocess, sys
 
-BBOX = (5.8, 43.5, 12.5, 48.0)          # lon_min, lat_min, lon_max, lat_max (same as bake_snow)
+BBOX = (5.8, 43.5, 13.0, 48.0)          # lon_min, lat_min, lon_max, lat_max (same as bake_snow)
 MAXZ = int(os.environ.get("HS_MAX_ZOOM", "12") or "12")
 ZFAC = os.environ.get("HS_Z", "1.4") or "1.4"
 S3 = "https://copernicus-dem-30m.s3.amazonaws.com"

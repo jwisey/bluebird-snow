@@ -35,7 +35,7 @@ from rasterio.transform import from_bounds
 from rasterio.enums import Resampling
 
 # ---- config -----------------------------------------------------------------
-BBOX = (5.8, 43.5, 12.5, 48.0)        # lon_min, lat_min, lon_max, lat_max
+BBOX = (5.8, 43.5, 13.0, 48.0)        # lon_min, lat_min, lon_max, lat_max
 SAMPLE_STEP = 0.25
 WINDOW_DAYS = 4                        # look-back for fresh snow + melt
 DEM_MAX_WIDTH = 2400                   # only used by the SRTM fallback
@@ -60,14 +60,20 @@ STATE_TIF = "snow-state.tif"           # persisted depth (cm) for accumulation
 # Depth-coded ramp (depth cm -> rgb) — DARKER = DEEPER. Thin snow is near-white,
 # deepening through blues to dark navy-indigo. 0 cm transparent via alpha (green
 # valleys come from the app's valley layer under this raster).
+# Calibrated 2026-08-03 against a real bake (15 Jan 2025, 175k sampled snow pixels):
+#   median 30 cm, 90th pct 66 cm, max 246 cm, and 0.00% of pixels above 250 cm.
+# The previous ramp topped out at 450 cm, so the whole dark half was NEVER reached and
+# ~81% of the Alps sat in the first two stops — hence the pale wash. Stops now track
+# the actual distribution so mid-winter depth uses the full colour range.
 RAMP = [
     (0,   (250, 252, 254)),   # trace: bright white
-    (10,  (232, 242, 251)),
-    (40,  (170, 210, 245)),   # pale ice-blue
-    (90,  (110, 170, 232)),
-    (180, ( 72, 122, 210)),   # mid blue
-    (300, ( 52,  78, 176)),   # deep blue-indigo
-    (450, ( 34,  38, 116)),   # deepest: dark navy
+    (8,   (226, 239, 251)),
+    (20,  (190, 220, 248)),   # pale ice-blue  (~25th pct)
+    (40,  (140, 190, 240)),   # light-mid blue (~median)
+    (70,  ( 96, 152, 224)),   # mid blue       (~90th pct)
+    (120, ( 64, 108, 200)),
+    (190, ( 44,  64, 160)),   # deep indigo
+    (250, ( 34,  38, 116)),   # deepest: dark navy (top of observed range)
 ]
 
 
