@@ -1,0 +1,70 @@
+name: Bake Alps piste tiles
+
+# Runs on demand and monthly. Piste geometry changes at the pace people edit OpenStreetMap,
+# which is nothing like the daily cadence the snow needs.
+on:
+  workflow_dispatch:
+    inputs:
+      max_zoom:
+        description: "Max tile zoom (14 is plenty for line geometry — MapLibre overzooms above it for free)"
+        required: false
+        default: "14"
+  schedule:
+    - cron: "0 4 1 * *"        # 04:00 UTC on the 1st
+
+permissions:
+  contents: write
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build tippecanoe
+        # Not in Ubuntu's repos, and the build is ~2 minutes. Felt maintains the live fork
+        # now that Mapbox archived the original.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libsqlite3-dev zlib1g-dev
+          git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
+          cd /tmp/tippecanoe
+          make -j"$(nproc)"
+          sudo make install
+          tippecanoe --version
+
+      - name: Install pmtiles CLI
+        run: |
+          curl -L -o pmtiles.tar.gz https://github.com/protomaps/go-pmtiles/releases/download/v1.22.1/go-pmtiles_1.22.1_Linux_x86_64.tar.gz
+          tar -xzf pmtiles.tar.gz pmtiles
+          sudo mv pmtiles /usr/local/bin/
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Smoke test (synthetic geometry, no network)
+        env: { PISTE_SELFTEST: "1", PISTE_MAX_ZOOM: "11" }
+        run: |
+          mkdir -p _smoke && cd _smoke && cp ../bake_pistes.py .
+          python bake_pistes.py
+          test -s alps-pistes.pmtiles && echo "smoke OK"
+
+      - name: Cache Overpass responses
+        uses: actions/cache@v4
+        with:
+          path: .osm-piste-cache
+          key: osm-pistes-${{ github.run_id }}
+          restore-keys: osm-pistes-
+
+      - name: Bake piste PMTiles
+        env:
+          PISTE_MAX_ZOOM: "${{ github.event.inputs.max_zoom || '14' }}"
+        run: python bake_pistes.py
+
+      - name: Publish to the 'pistes' release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pistes
+          name: Alps piste + lift vector tiles
+          files: alps-pistes.pmtiles
