@@ -43,7 +43,16 @@ WINDOW_DAYS = 4                        # look-back for fresh snow + melt
 # model fitted one straight line from the snow line through a single anchor at the model
 # cell's mean elevation (~1200 m in the Alps) and extrapolated it to 3000 m+ — which badly
 # under-read high ground (measured: 30 cm median vs 450 cm reported at Zermatt mid-mountain).
-PROFILE_ELEVS = (1000, 1750, 2500, 3250)
+# 4000 m is sampled rather than extrapolated to. The first corrected bake ran without it and
+# the linear extrapolation above 3250 m pushed the top of the distribution into the 800 cm
+# clip (p99 691, max 800) - invented depth on exactly the high glaciated terrain the map
+# makes the most of. Above the top sample the profile is now held flat: there is barely any
+# Alpine terrain above 4000 m, and what there is gets wind-scoured rather than deeper.
+PROFILE_ELEVS = (1000, 1750, 2500, 3250, 4000)
+# Depth below this is not cover. Without it the profile's low-elevation tail left a wash of
+# sub-centimetre "snow" across the valleys: the first corrected bake reported 55.8% coverage
+# with p10 and p25 both rounding to 0 cm.
+MIN_COVER_CM = 3.0
 DEM_MAX_WIDTH = 2400                   # only used by the SRTM fallback
 MIN_ZOOM = int(os.environ.get("SNOW_MIN_ZOOM", "5"))
 MAX_ZOOM = int(os.environ.get("SNOW_MAX_ZOOM", "11"))
@@ -67,7 +76,7 @@ DEM_ZOOM = int(os.environ.get("DEM_ZOOM", "9"))
 # state into the profile model dilutes the correction back to about a third of itself and
 # hides the fix. Bump this whenever the depth model changes; state written by any other
 # version is ignored rather than blended in.
-MODEL_VERSION = "2026-08-04-elevation-profile"
+MODEL_VERSION = "2026-08-04-elevation-profile-4000m"
 IGNORE_STATE = os.environ.get("SNOW_IGNORE_STATE") == "1"
 
 STATE_TIF = "snow-state.tif"           # persisted depth (cm) for accumulation
@@ -132,8 +141,8 @@ def _get_json(url, params, tries=4):
 
 
 def fetch_samples(end_date):
-    """-> list of (lon, lat, snowline_m, fresh_cm, freezing_m, d0, d1, d2, d3)
-    where dN = snow depth (cm) at PROFILE_ELEVS[N]."""
+    """-> list of (lon, lat, snowline_m, fresh_cm, freezing_m, *depths)
+    where depths[N] = snow depth (cm) at PROFILE_ELEVS[N]."""
     if SELFTEST:
         return synthetic_samples(end_date)
     start = (end_date - datetime.timedelta(days=WINDOW_DAYS - 1)).isoformat()
@@ -188,7 +197,7 @@ def fetch_samples(end_date):
         # not where snow lies, and using it as the cover boundary erased lying snow on
         # mild days (Zermatt showed a 450 cm base above a bare green mountain).
         out.append((lons[i], lats[i], max(0.0, freez[i] - 150.0), fresh[i], freez[i],
-                    prof[0][i], prof[1][i], prof[2][i], prof[3][i]))
+                    *[prof[k][i] for k in range(len(PROFILE_ELEVS))]))
     return out
 
 
@@ -217,19 +226,22 @@ def synthetic_samples(end_date):
 # ---- 2. smooth param fields -------------------------------------------------
 def fields(samples, grid, shape):
     """One Delaunay triangulation reused for every field.
-    Returns the 4-level depth profile plus the forcings, all on the DEM grid."""
+    Returns the depth profile (one level per PROFILE_ELEVS) plus the forcings, on the DEM
+    grid. Sized off PROFILE_ELEVS rather than hard-coded, so adding a sample elevation is a
+    one-line change instead of four."""
+    np_lv = len(PROFILE_ELEVS)
+    ncol = 3 + np_lv                             # snowline, fresh, freezing, then the profile
     pts = np.array([(s[0], s[1]) for s in samples], dtype=float)
-    cols = np.array([[s[2], s[3], s[4], s[5], s[6], s[7], s[8]] for s in samples], dtype=float)
-    #                snowline fresh freezing  d0    d1    d2    d3
+    cols = np.array([[s[2], s[3], s[4], *s[5:5 + np_lv]] for s in samples], dtype=float)
 
     lin = LinearNDInterpolator(pts, cols)        # triangulates ONCE
     v = lin(grid)
     bad = ~np.isfinite(v[:, 0])
     if bad.any():
         v[bad] = NearestNDInterpolator(pts, cols)(grid[bad])
-    v = v.reshape(tuple(shape) + (7,))
+    v = v.reshape(tuple(shape) + (ncol,))
     return dict(snowline=v[..., 0], fresh=v[..., 1], freezing=v[..., 2],
-                profile=np.clip(v[..., 3:7], 0, None))
+                profile=np.clip(v[..., 3:ncol], 0, None))
 
 
 def profile_depth(dem, profile):
@@ -245,8 +257,10 @@ def profile_depth(dem, profile):
         m = (dem > E[k]) & (dem <= E[k + 1])
         t = (dem - E[k]) / (E[k + 1] - E[k])
         d = np.where(m, p[k] * (1 - t) + p[k + 1] * t, d)
-    hi_slope = (p[-1] - p[-2]) / (E[-1] - E[-2])
-    d = np.where(dem > E[-1], p[-1] + hi_slope * (dem - E[-1]), d)
+    # Above the highest SAMPLED elevation, hold flat. Extrapolating the 3250->4000 m slope
+    # out to Mont Blanc is invention, and the first corrected bake showed exactly that: the
+    # top of the distribution ran into the 800 cm clip.
+    d = np.where(dem > E[-1], p[-1], d)
     return np.clip(d, 0, 800)
 
 
@@ -398,7 +412,10 @@ def model(dem, f, slope, northness, doy):
     melt = MELT_CM_PER_DEGDAY * WINDOW_DAYS * np.maximum(0, t_above) * (0.5 + 0.9 * south) * season
 
     depth = base * aspect_factor * slope_factor + fresh - melt
-    return np.clip(depth, 0, 800)
+    depth = np.clip(depth, 0, 800)
+    # A millimetre of modelled snow is not cover. Cutting it here keeps the coverage figure
+    # honest and stops the valleys picking up a faint tint from the profile's low-end tail.
+    return np.where(depth < MIN_COVER_CM, 0.0, depth)
 
 
 def save_state(depth, bounds):
