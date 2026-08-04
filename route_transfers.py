@@ -62,11 +62,20 @@ def haversine(a, b, c, d):
 
 
 def drive(alat, alon, rlat, rlon, tries=4):
-    """Minutes, km and the road geometry. Full geometry, not simplified: a simplified
-    overview can drop the vertices either side of a summit, which is exactly where the
-    closed-pass check needs points."""
+    """Fastest route that stays off closed passes: (minutes, km, None), or
+    (None, None, pass_name) if every route offered goes over one.
+
+    Alternatives matter here. Rejecting OSRM's single best answer would have thrown away
+    gateways that are perfectly reachable in winter by a different road - Grenoble to Serre
+    Chevalier goes over the Galibier in summer and under the Lautaret in winter, and only
+    asking for one route means losing Grenoble entirely rather than gaining twenty minutes.
+    So ask for up to three and keep the quickest that is open.
+
+    Geometry is requested in full rather than simplified: a simplified overview can drop the
+    vertices either side of a summit, which is exactly where the closed-pass check looks.
+    """
     url = (f"{OSRM}/{alon},{alat};{rlon},{rlat}"
-           "?overview=full&geometries=polyline")
+           "?overview=full&geometries=polyline&alternatives=3")
     last = None
     for attempt in range(tries):
         try:
@@ -76,14 +85,23 @@ def drive(alat, alon, rlat, rlon, tries=4):
             # A 200 with a non-Ok code is a routing failure, not a success. Check it.
             if d.get("code") != "Ok" or not d.get("routes"):
                 raise RuntimeError(f"OSRM code={d.get('code')!r}")
-            route = d["routes"][0]
-            pts = decode(route.get("geometry") or "")
-            # A route with no geometry cannot be checked for closed passes, and an
-            # unchecked route is the thing this whole pass exists to avoid. Retry it.
-            if not pts:
-                raise RuntimeError("route came back without geometry")
-            return (int(round(route["duration"] / 60.0)),
-                    round(route["distance"] / 1000.0), pts)
+            open_routes, shut_by = [], None
+            for route in d["routes"]:
+                pts = decode(route.get("geometry") or "")
+                # A route with no geometry cannot be checked for closed passes, and an
+                # unchecked route is the thing this whole pass exists to avoid.
+                if not pts:
+                    raise RuntimeError("route came back without geometry")
+                shut = blocked_by(pts)
+                if shut:
+                    shut_by = shut_by or shut
+                else:
+                    open_routes.append(route)
+            if not open_routes:
+                return None, None, shut_by
+            best = min(open_routes, key=lambda r_: r_["duration"])
+            return (int(round(best["duration"] / 60.0)),
+                    round(best["distance"] / 1000.0), None)
         except Exception as ex:                                  # noqa: BLE001
             last = ex
             if attempt < tries - 1:
@@ -102,13 +120,12 @@ def main():
                       key=lambda kv: haversine(r["lat"], r["lon"], kv[1][1], kv[1][2]))
         opts = []
         for code, (nm, alat, alon) in near[:CANDIDATES]:
-            mins, km, pts = drive(alat, alon, r["lat"], r["lon"])
+            mins, km, shut = drive(alat, alon, r["lat"], r["lon"])
             time.sleep(GAP)
-            if not mins:
-                continue
-            shut = blocked_by(pts)
             if shut:
-                REJECTED.append((r["name"], code, mins, shut))
+                REJECTED.append((r["name"], code, shut))
+                continue
+            if not mins:
                 continue
             opts.append({"code": code, "airport": nm, "minutes": mins, "km": km})
         opts.sort(key=lambda o: o["minutes"])
@@ -126,9 +143,9 @@ def main():
     # Every discarded gateway, so a wrong entry in winter_passes.CLOSED shows up as an
     # obviously silly rejection in the log instead of quietly deleting good routes.
     if REJECTED:
-        print(f"\n{len(REJECTED)} gateways dropped for a closed pass:")
-        for nm, code, mins, shut in REJECTED:
-            print(f"    {nm[:24]:24s} {code}  {mins:4d}min  via {shut}")
+        print(f"\n{len(REJECTED)} gateways dropped - every route offered crossed a closed pass:")
+        for nm, code, shut in REJECTED:
+            print(f"    {nm[:24]:24s} {code}  via {shut}")
 
     # A resort with no gateway would silently keep its old hand-written guess. Say so
     # loudly rather than letting a partial result look complete.
