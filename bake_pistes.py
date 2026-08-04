@@ -20,6 +20,7 @@ Env knobs:
   PISTE_SELFTEST=1                  synthetic geometry, no network - exercises the whole
                                     GeoJSON -> tippecanoe -> pmtiles path offline
 """
+import datetime
 import json, math, os, subprocess, sys, time, urllib.parse, urllib.request
 
 BBOX = (5.8, 43.5, 13.0, 48.0)          # lon_min, lat_min, lon_max, lat_max - matches bake_snow
@@ -69,6 +70,23 @@ def tiles():
     return out
 
 
+def healthy(d):
+    """True if this is a real Overpass answer rather than a broken replica.
+
+    A mirror serving an uninitialised database answers HTTP 200, with well-formed JSON and
+    ZERO elements, stamping `timestamp_osm_base` with a bare sequence number ("116149")
+    instead of an ISO date. No exception is raised, so no retry fires and the empty answer
+    is treated as truth. In the terrain run this silently erased the pistes of Cortina,
+    Alpe d'Huez, Zell am See, Kaprun and Saalbach. Here it would punch holes in the map.
+    """
+    stamp = (d.get("osm3s") or {}).get("timestamp_osm_base") or ""
+    try:
+        datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        return True
+    except ValueError:
+        return False
+
+
 def fetch_tile(s, w, tries=5):
     os.makedirs(CACHE, exist_ok=True)
     path = os.path.join(CACHE, f"{s:.2f}_{w:.2f}.json")
@@ -93,6 +111,14 @@ out geom tags;
                 headers={"User-Agent": UA})
             with urllib.request.urlopen(req, timeout=420) as r:
                 d = json.loads(r.read().decode())
+            if not healthy(d):
+                raise RuntimeError(
+                    f"{url} answered 200 but from a broken replica "
+                    f"(timestamp_osm_base="
+                    f"{(d.get('osm3s') or {}).get('timestamp_osm_base')!r}, "
+                    f"{len(d.get('elements', []))} elements) - not caching it")
+            # Only validated answers reach the cache. A cached bad answer poisons every
+            # later run, which is worse than the original failure.
             with open(path, "w") as f:
                 json.dump(d, f)
             return d
