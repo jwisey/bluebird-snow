@@ -58,15 +58,50 @@ def run(cmd):
     subprocess.run(cmd, check=True)
 
 
+# How far outside a resort's own tile we still fetch. 0.25 degrees is about 28 km here, so a
+# resort sitting near a tile edge still gets the neighbouring tile and its runs are not cut in
+# half. Bigger buffers cost real time for terrain nobody in this app will look at.
+NEAR_RESORT_DEG = 0.25
+
+
+_TILES = None
+
+
 def tiles():
-    out = []
+    """Only the tiles that can contain a run we will ever draw. Computed once.
+
+    The full bounding box is 135 tiles, and most of them are the Po plain, the Rhone valley
+    or the outskirts of Munich - flat ground with no pistes on it, each still costing a full
+    Overpass geometry query. The first real run spent three hours on that and was killed by
+    the job timeout before it wrote anything. Filtering to tiles near one of the 70 resorts
+    cuts it to about 57, which is what the terrain script has always fetched.
+
+    The honest consequence: this layer covers the resorts the app knows about, not every
+    piste in the Alps. Pan far enough from a resort and the runs stop.
+    """
+    global _TILES
+    if _TILES is not None:
+        return _TILES
+    with open("resort_coords.json") as f:
+        resorts = json.load(f)
+    out, skipped = [], 0
     lat = math.floor(BBOX[1] / TILE) * TILE
     while lat < BBOX[3]:
         lon = math.floor(BBOX[0] / TILE) * TILE
         while lon < BBOX[2]:
-            out.append((round(lat, 2), round(lon, 2)))
+            s_, w_ = round(lat, 2), round(lon, 2)
+            n_, e_ = s_ + TILE, w_ + TILE
+            b = NEAR_RESORT_DEG
+            if any(s_ - b <= r["lat"] <= n_ + b and w_ - b <= r["lon"] <= e_ + b
+                   for r in resorts):
+                out.append((s_, w_))
+            else:
+                skipped += 1
             lon += TILE
         lat += TILE
+    print(f"{len(out)} tiles to fetch, {skipped} skipped as having no resort within "
+          f"{NEAR_RESORT_DEG} degrees", flush=True)
+    _TILES = out
     return out
 
 
@@ -87,7 +122,7 @@ def healthy(d):
         return False
 
 
-def fetch_tile(s, w, tries=5):
+def fetch_tile(s, w, tries=4):
     os.makedirs(CACHE, exist_ok=True)
     path = os.path.join(CACHE, f"{s:.2f}_{w:.2f}.json")
     if os.path.exists(path) and os.path.getsize(path) > 2:
@@ -95,7 +130,7 @@ def fetch_tile(s, w, tries=5):
             return json.load(f)
     n, e = s + TILE, w + TILE
     q = f"""
-[out:json][timeout:240];
+[out:json][timeout:120];
 (
   way["piste:type"="downhill"]({s},{w},{n},{e});
   way["aerialway"]({s},{w},{n},{e});
@@ -109,7 +144,7 @@ out geom tags;
             req = urllib.request.Request(
                 url, data=urllib.parse.urlencode({"data": q}).encode(),
                 headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=420) as r:
+            with urllib.request.urlopen(req, timeout=180) as r:
                 d = json.loads(r.read().decode())
             if not healthy(d):
                 raise RuntimeError(
@@ -124,7 +159,7 @@ out geom tags;
             return d
         except Exception as ex:                                  # noqa: BLE001
             last = ex
-            wait = 15 * (attempt + 1)
+            wait = 10 * (attempt + 1)
             print(f"    {type(ex).__name__}: {ex} - retrying in {wait}s", flush=True)
             time.sleep(wait)
     print(f"    GAVE UP on tile {s},{w}: {last}", flush=True)
@@ -145,8 +180,19 @@ def collect():
         return synthetic()
     pistes, lifts, seen = [], [], set()
     tl = tiles()
-    print(f"{len(tl)} tiles (cached in {CACHE}/)")
+    print(f"caching in {CACHE}/")
+    # The job is capped at 180 minutes and the tiling and upload still have to happen after
+    # this. Stop fetching at 120 so the run ends with a message naming the tiles it never
+    # got, rather than being killed silently three hours in with nothing written.
+    budget = float(os.environ.get("PISTE_FETCH_BUDGET_MIN", "120")) * 60
+    started = time.monotonic()
     for i, (s, w) in enumerate(tl, 1):
+        if time.monotonic() - started > budget:
+            print(f"\nfetch budget of {budget/60:.0f} min spent at tile {i} of {len(tl)} - "
+                  f"stopping here rather than being killed mid-bake", flush=True)
+            FAILED.extend(tl[i - 1:])
+            break
+        t0 = time.monotonic()
         d = fetch_tile(s, w)
         got_p = got_l = 0
         for el in d.get("elements", []):
@@ -179,7 +225,8 @@ def collect():
                 })
                 got_p += 1
         print(f"[{i}/{len(tl)}] {s:.1f},{w:.1f}  +{got_p} pistes +{got_l} lifts "
-              f"(running {len(pistes)}/{len(lifts)})", flush=True)
+              f"(running {len(pistes)}/{len(lifts)})  {time.monotonic() - t0:.0f}s"
+              f"  [{(time.monotonic() - started) / 60:.0f}/{budget / 60:.0f} min]", flush=True)
         time.sleep(1.5)
     return pistes, lifts
 
