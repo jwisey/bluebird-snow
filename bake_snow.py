@@ -28,6 +28,7 @@ Env knobs:
   DEM_ZOOM       terrarium tile zoom (default 9 ≈ 215 m/px; 10 ≈ 108 m/px = 4× the tiles)
 """
 import os, math, datetime, subprocess, io, sys, time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
@@ -55,7 +56,14 @@ PROFILE_ELEVS = (1000, 1750, 2500, 3250, 4000)
 # with p10 and p25 both rounding to 0 cm.
 MIN_COVER_CM = 3.0
 # Concurrent Open-Meteo requests. Their free tier allows 600/minute; this is 6.
-SAMPLE_WORKERS = int(os.environ.get("SAMPLE_WORKERS", "6"))
+# Concurrency for the Open-Meteo sampling. Six was too many: each of these requests carries
+# 50 coordinates and takes ~16s to serve, so six at once tripped their per-minute allowance
+# and run #8 died on "Minutely API request limit exceeded" after 17 minutes of retrying.
+# The limit is about the WEIGHT of what is in flight, not the request count, so the fix is a
+# shared minimum gap between request starts rather than just fewer threads.
+SAMPLE_WORKERS = int(os.environ.get("SAMPLE_WORKERS", "3"))
+MIN_REQUEST_GAP = float(os.environ.get("MIN_REQUEST_GAP", "2.0"))   # seconds, across all threads
+RATE_LIMIT_WAIT = float(os.environ.get("RATE_LIMIT_WAIT", "65"))    # 429 says "try again in a minute"
 # Ceiling on a SAMPLED profile depth. Open-Meteo's snow_depth over permanent ice is an
 # artefact: the land model accumulates snow on a glacier cell with no ice dynamics and no
 # summer floor, so it drifts upward without bound. The 2025-01-15 bake showed it plainly -
@@ -123,6 +131,10 @@ def bake_date():
 
 
 # ---- 1. forcings from Open-Meteo -------------------------------------------
+class _RateLimited(Exception):
+    """HTTP 429 - over the per-minute allowance, distinct from a network hiccup."""
+
+
 def _sample_grid():
     lats, lons = [], []
     lat = BBOX[1]
@@ -134,17 +146,44 @@ def _sample_grid():
     return lats, lons
 
 
-def _get_json(url, params, tries=4):
-    """Open-Meteo rate-limits and occasionally times out; retry with backoff."""
+_rate_lock = threading.Lock()
+_last_request = [0.0]
+
+
+def _throttle():
+    """Space request STARTS at least MIN_REQUEST_GAP apart, across every worker thread.
+    Sleeping while holding the lock is deliberate: it makes threads queue in turn instead of
+    all waking together and bursting, which is what got us rate-limited in the first place."""
+    with _rate_lock:
+        wait = _last_request[0] + MIN_REQUEST_GAP - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _last_request[0] = time.monotonic()
+
+
+def _get_json(url, params, tries=6):
+    """Open-Meteo rate-limits and occasionally times out; throttle, then retry with backoff.
+
+    A 429 is not a transient blip - it means we are over the per-minute allowance and so is
+    every other request in flight. Backing off 5s and trying again just burns a retry, so a
+    429 waits out the full minute the API asks for. Timeouts keep the exponential ladder."""
     import requests
     last = None
     for a in range(tries):
+        _throttle()
         try:
             r = requests.get(url, params=params, timeout=180)
-            if r.status_code == 429 or r.status_code >= 500:
+            if r.status_code == 429:
+                raise _RateLimited(r.text[:160])
+            if r.status_code >= 500:
                 raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
             r.raise_for_status()
             return r.json()
+        except _RateLimited as e:
+            last = e
+            print(f"  rate-limited, waiting {RATE_LIMIT_WAIT:.0f}s ({a + 1}/{tries})")
+            sys.stdout.flush()
+            time.sleep(RATE_LIMIT_WAIT)
         except Exception as e:                      # noqa: BLE001
             last = e
             wait = 5 * (2 ** a)
