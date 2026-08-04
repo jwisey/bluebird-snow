@@ -49,8 +49,19 @@ AIRPORTS = {
     "CMF": ("Chambery", 45.6381, 5.8800),   "LUG": ("Lugano", 46.0043, 8.9106),
 }
 
+# Villages no road reaches. Routing to the village itself makes OSRM snap onto whatever
+# track is nearest and "drive" it: Wengen came back as 192 km in 4h24, an average of 44 km/h,
+# while Grindelwald - same valley, same approach - was 175 km in 2h19. The honest number is
+# the drive to where you actually park, so route to the road head and say so. The last leg
+# is a mountain railway or cable car and is NOT included in the minutes below.
+ROAD_HEAD = {
+    "wengen":  (46.5936, 7.9086, "Lauterbrunnen"),   # train up to Wengen
+    "murren":  (46.5253, 7.9033, "Stechelberg"),     # cable car up to Murren
+    "zermatt": (46.0686, 7.7794, "Tasch"),           # shuttle train up to Zermatt
+}
+
 FAILED = []
-REJECTED = []           # (resort, code, minutes, pass name) - printed so it can be audited
+REJECTED = []           # (resort, code, pass name) - printed so it can be audited
 
 
 def haversine(a, b, c, d):
@@ -116,18 +127,23 @@ def main():
           f"keeping the {KEEP} fastest open in winter\n", flush=True)
     out = {}
     for i, r in enumerate(resorts, 1):
+        head = ROAD_HEAD.get(r["id"])
+        dlat, dlon = (head[0], head[1]) if head else (r["lat"], r["lon"])
         near = sorted(AIRPORTS.items(),
-                      key=lambda kv: haversine(r["lat"], r["lon"], kv[1][1], kv[1][2]))
+                      key=lambda kv: haversine(dlat, dlon, kv[1][1], kv[1][2]))
         opts = []
         for code, (nm, alat, alon) in near[:CANDIDATES]:
-            mins, km, shut = drive(alat, alon, r["lat"], r["lon"])
+            mins, km, shut = drive(alat, alon, dlat, dlon)
             time.sleep(GAP)
             if shut:
                 REJECTED.append((r["name"], code, shut))
                 continue
             if not mins:
                 continue
-            opts.append({"code": code, "airport": nm, "minutes": mins, "km": km})
+            opt = {"code": code, "airport": nm, "minutes": mins, "km": km}
+            if head:
+                opt["roadHead"] = head[2]     # drive ends here; rail or cable car beyond
+            opts.append(opt)
         opts.sort(key=lambda o: o["minutes"])
         opts = opts[:KEEP]
         out[r["id"]] = opts
@@ -135,6 +151,7 @@ def main():
             b = opts[0]
             print(f"[{i}/{len(resorts)}] {r['name'][:24]:24s} "
                   f"{b['code']} {b['minutes']}min {b['km']}km"
+                  + (f" -> {head[2]}" if head else "")
                   + (f"  (+{len(opts)-1} more)" if len(opts) > 1 else ""), flush=True)
         else:
             FAILED.append(r["name"])
