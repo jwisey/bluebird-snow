@@ -50,8 +50,13 @@ jobs:
           python bake_pistes.py
           test -s alps-pistes.pmtiles && echo "smoke OK"
 
-      - name: Cache Overpass responses
-        uses: actions/cache@v4
+      # Restore + always-save, split deliberately. actions/cache@v4 only saves in its post
+      # step when the JOB SUCCEEDS, so a bake that trips the "too many holes" guard (exit 1)
+      # banks nothing — every re-run then re-fetches all 57 tiles from scratch and is one
+      # more Overpass congestion window away from failing again. Splitting it lets the save
+      # run with if: always(), so a partial fetch persists and the next run only retries gaps.
+      - name: Restore Overpass cache
+        uses: actions/cache/restore@v4
         with:
           path: .osm-piste-cache
           key: osm-pistes-${{ github.run_id }}
@@ -61,6 +66,13 @@ jobs:
         env:
           PISTE_MAX_ZOOM: "${{ github.event.inputs.max_zoom || '14' }}"
         run: python bake_pistes.py
+
+      - name: Save Overpass cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .osm-piste-cache
+          key: osm-pistes-${{ github.run_id }}
 
       - name: Publish to the 'pistes' release
         uses: softprops/action-gh-release@v2
