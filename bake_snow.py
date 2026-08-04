@@ -5,7 +5,7 @@ Bluebird snow baker — Phase B, enhanced physical model.
 Builds a smooth, regional, DRAMATIC snow-depth raster for the Alps and writes it as PMTiles.
 
 Model (all driven by free data + the high-res DEM — the terrain provides the detail):
-  base   = clamp(slope·(elev − snowLine), 0, cap)        # altitude profile, anchored to reports
+  base   = depth sampled from Open-Meteo at 4 elevations, interpolated by DEM height
   × aspect factor   (north faces hold snow, south faces melt)
   × slope factor    (steep sheds, bowls collect)
   + fresh snow      (recent snowfall, where it's cold enough)
@@ -38,6 +38,12 @@ from rasterio.enums import Resampling
 BBOX = (5.8, 43.5, 13.0, 48.0)        # lon_min, lat_min, lon_max, lat_max
 SAMPLE_STEP = 0.25
 WINDOW_DAYS = 4                        # look-back for fresh snow + melt
+# Open-Meteo does elevation-corrected downscaling when you pass `elevation`. Sampling the
+# SAME lat/lon at several elevations recovers the real depth-vs-height profile. The old
+# model fitted one straight line from the snow line through a single anchor at the model
+# cell's mean elevation (~1200 m in the Alps) and extrapolated it to 3000 m+ — which badly
+# under-read high ground (measured: 30 cm median vs 450 cm reported at Zermatt mid-mountain).
+PROFILE_ELEVS = (1000, 1750, 2500, 3250)
 DEM_MAX_WIDTH = 2400                   # only used by the SRTM fallback
 MIN_ZOOM = int(os.environ.get("SNOW_MIN_ZOOM", "5"))
 MAX_ZOOM = int(os.environ.get("SNOW_MAX_ZOOM", "11"))
@@ -60,20 +66,22 @@ STATE_TIF = "snow-state.tif"           # persisted depth (cm) for accumulation
 # Depth-coded ramp (depth cm -> rgb) — DARKER = DEEPER. Thin snow is near-white,
 # deepening through blues to dark navy-indigo. 0 cm transparent via alpha (green
 # valleys come from the app's valley layer under this raster).
-# Calibrated 2026-08-03 against a real bake (15 Jan 2025, 175k sampled snow pixels):
-#   median 30 cm, 90th pct 66 cm, max 246 cm, and 0.00% of pixels above 250 cm.
-# The previous ramp topped out at 450 cm, so the whole dark half was NEVER reached and
-# ~81% of the Alps sat in the first two stops — hence the pale wash. Stops now track
-# the actual distribution so mid-winter depth uses the full colour range.
+# RAMP — PROVISIONAL, re-measure after the first corrected bake.
+# The 0-250 cm fit made on 2026-08-03 was calibrated against the OLD single-anchor model,
+# which under-read high ground ~3.8x (47 cm vs 180 cm at 2500 m). With the elevation-profile
+# model the same terrain reports roughly 3-4x more, so that ramp would saturate to flat navy.
+# Widened to a physically sensible Alpine winter range (0-400 cm) as an interim.
+# TO RE-FIT: bake a January date, then sample the tiles and read off the depth histogram —
+# fit the stops to the measured median / p90 / max exactly as before. Do not guess.
 RAMP = [
     (0,   (250, 252, 254)),   # trace: bright white
-    (8,   (226, 239, 251)),
-    (20,  (190, 220, 248)),   # pale ice-blue  (~25th pct)
-    (40,  (140, 190, 240)),   # light-mid blue (~median)
-    (70,  ( 96, 152, 224)),   # mid blue       (~90th pct)
-    (120, ( 64, 108, 200)),
-    (190, ( 44,  64, 160)),   # deep indigo
-    (250, ( 34,  38, 116)),   # deepest: dark navy (top of observed range)
+    (15,  (226, 239, 251)),
+    (45,  (190, 220, 248)),   # pale ice-blue
+    (90,  (140, 190, 240)),   # light-mid blue
+    (150, ( 96, 152, 224)),   # mid blue
+    (230, ( 64, 108, 200)),
+    (320, ( 44,  64, 160)),   # deep indigo
+    (400, ( 34,  38, 116)),   # deepest: dark navy
 ]
 
 
@@ -115,79 +123,122 @@ def _get_json(url, params, tries=4):
 
 
 def fetch_samples(end_date):
-    """-> list of (lon, lat, elev, base_cm, snowline_m, fresh_cm, freezing_m)"""
+    """-> list of (lon, lat, snowline_m, fresh_cm, freezing_m, d0, d1, d2, d3)
+    where dN = snow depth (cm) at PROFILE_ELEVS[N]."""
     if SELFTEST:
         return synthetic_samples(end_date)
     start = (end_date - datetime.timedelta(days=WINDOW_DAYS - 1)).isoformat()
     end = end_date.isoformat()
     lats, lons = _sample_grid()
-    samples = []
-    CH = 50          # was 120 — smaller chunks are far less likely to 400 / time out
-    for i in range(0, len(lats), CH):
+    n = len(lats)
+    CH = 50
+
+    # Pass A — depth profile. Only the final value is used, so ask for ONE day per
+    # elevation rather than the whole window; that keeps 4 sweeps cheaper than the
+    # single window request this replaces.
+    prof = [[0.0] * n for _ in PROFILE_ELEVS]
+    for k, E in enumerate(PROFILE_ELEVS):
+        for i in range(0, n, CH):
+            la, lo = lats[i:i + CH], lons[i:i + CH]
+            arr = _get_json("https://archive-api.open-meteo.com/v1/archive", {
+                "latitude": ",".join(map(str, la)), "longitude": ",".join(map(str, lo)),
+                "elevation": ",".join([str(E)] * len(la)),
+                "start_date": end, "end_date": end,
+                "hourly": "snow_depth", "timezone": "UTC",
+            })
+            arr = arr if isinstance(arr, list) else [arr]
+            for j, loc in enumerate(arr):
+                sd = [v for v in ((loc.get("hourly") or {}).get("snow_depth") or [])
+                      if v is not None] or [0]
+                prof[k][i + j] = max(0.0, sd[-1] * 100.0)     # snow_depth is metres
+        print(f"  depth profile {E} m done"); sys.stdout.flush()
+
+    # Pass B — fresh snow + freezing level over the look-back window (elevation-independent).
+    fresh = [0.0] * n
+    freez = [0.0] * n
+    for i in range(0, n, CH):
         la, lo = lats[i:i + CH], lons[i:i + CH]
-        params = {
+        arr = _get_json("https://archive-api.open-meteo.com/v1/archive", {
             "latitude": ",".join(map(str, la)), "longitude": ",".join(map(str, lo)),
             "start_date": start, "end_date": end,
-            "hourly": "snow_depth,snowfall,freezing_level_height", "timezone": "UTC",
-        }
-        arr = _get_json("https://archive-api.open-meteo.com/v1/archive", params)
+            "hourly": "snowfall,freezing_level_height", "timezone": "UTC",
+        })
         arr = arr if isinstance(arr, list) else [arr]
         for j, loc in enumerate(arr):
-            elev = float(loc.get("elevation", 0) or 0)
-            h = loc.get("hourly", {})
-            sd = [v for v in (h.get("snow_depth") or []) if v is not None] or [0]
+            h = loc.get("hourly") or {}
             sf = [v for v in (h.get("snowfall") or []) if v is not None] or [0]
-            fz = [v for v in (h.get("freezing_level_height") or []) if v is not None] or [elev]
-            base_cm = max(0.0, sd[-1] * 100.0)       # snow_depth is metres
-            fresh_cm = max(0.0, sum(sf))             # snowfall is cm
-            freezing = float(np.mean(fz))
-            snowline = max(0.0, freezing - 150.0)
-            samples.append((lo[j], la[j], elev, base_cm, snowline, fresh_cm, freezing))
-        print(f"  fetched {min(i + CH, len(lats))}/{len(lats)}"); sys.stdout.flush()
-    return samples
+            fz = [v for v in (h.get("freezing_level_height") or []) if v is not None] or [0]
+            fresh[i + j] = max(0.0, sum(sf))                  # snowfall is cm
+            freez[i + j] = float(np.mean(fz))
+        print(f"  forcings {min(i + CH, n)}/{n}"); sys.stdout.flush()
+
+    out = []
+    for i in range(n):
+        # snowline is kept ONLY for the melt term now. Snow COVER comes from the depth
+        # profile going to zero — freezing level is where precip falls as snow today,
+        # not where snow lies, and using it as the cover boundary erased lying snow on
+        # mild days (Zermatt showed a 450 cm base above a bare green mountain).
+        out.append((lons[i], lats[i], max(0.0, freez[i] - 150.0), fresh[i], freez[i],
+                    prof[0][i], prof[1][i], prof[2][i], prof[3][i]))
+    return out
 
 
 def synthetic_samples(end_date):
-    """Offline stand-in: physically plausible deep-winter Alpine forcings."""
+    """Offline stand-in: physically plausible deep-winter Alpine forcings, sampled as a
+    CONVEX depth-vs-elevation profile so SELFTEST exercises the same code path as live."""
     lats, lons = _sample_grid()
     rng = np.random.default_rng(20240215)
     out = []
     for lat, lon in zip(lats, lons):
         core = math.exp(-(((lat - 46.3) / 1.5) ** 2 + ((lon - 9.3) / 2.6) ** 2))
-        elev = 250 + 2100 * core + rng.normal(0, 90)
         freezing = 1150 - 260 * (lat - 46.0) - 170 * core + rng.normal(0, 70)
         freezing = float(np.clip(freezing, 600, 2600))
         snowline = max(0.0, freezing - 150.0)
-        base_cm = float(max(0.0, (elev - snowline) * 0.12 + rng.normal(0, 8)))
-        fresh_cm = float(max(0.0, rng.normal(9, 6) * (0.4 + core)))
-        out.append((lon, lat, float(elev), base_cm, snowline, fresh_cm, freezing))
+        prof = []
+        for E in PROFILE_ELEVS:
+            # convex: little at the snow line, accelerating with height
+            above = max(0.0, E - snowline)
+            d = (above ** 1.32) * 0.0055 * (0.55 + 0.9 * core) + rng.normal(0, 4)
+            prof.append(float(max(0.0, d)))
+        fresh = float(max(0.0, rng.normal(9, 6) * (0.4 + core)))
+        out.append((lon, lat, snowline, fresh, freezing, *prof))
     return out
 
 
 # ---- 2. smooth param fields -------------------------------------------------
 def fields(samples, grid, shape):
-    """One Delaunay triangulation reused for every field (was 10 rebuilds)."""
+    """One Delaunay triangulation reused for every field.
+    Returns the 4-level depth profile plus the forcings, all on the DEM grid."""
     pts = np.array([(s[0], s[1]) for s in samples], dtype=float)
-    elev_anchor = np.array([s[2] for s in samples], dtype=float)
-    base_anchor = np.array([s[3] for s in samples], dtype=float)
-    snowline_a = np.array([s[4] for s in samples], dtype=float)
-    fresh_a = np.array([s[5] for s in samples], dtype=float)
-    freezing_a = np.array([s[6] for s in samples], dtype=float)
+    cols = np.array([[s[2], s[3], s[4], s[5], s[6], s[7], s[8]] for s in samples], dtype=float)
+    #                snowline fresh freezing  d0    d1    d2    d3
 
-    slope_i = np.where((elev_anchor > snowline_a) & (base_anchor > 0),
-                       base_anchor / np.maximum(1.0, elev_anchor - snowline_a), 0.0)
-    cap_i = np.minimum(500.0, np.maximum(base_anchor * 2.0, 80.0))
-
-    stack = np.column_stack([snowline_a, fresh_a, freezing_a, slope_i, cap_i])
-    lin = LinearNDInterpolator(pts, stack)        # triangulates ONCE
+    lin = LinearNDInterpolator(pts, cols)        # triangulates ONCE
     v = lin(grid)
     bad = ~np.isfinite(v[:, 0])
     if bad.any():
-        near = NearestNDInterpolator(pts, stack)
-        v[bad] = near(grid[bad])
-    v = v.reshape(tuple(shape) + (5,))
+        v[bad] = NearestNDInterpolator(pts, cols)(grid[bad])
+    v = v.reshape(tuple(shape) + (7,))
     return dict(snowline=v[..., 0], fresh=v[..., 1], freezing=v[..., 2],
-                slope=v[..., 3], cap=v[..., 4])
+                profile=np.clip(v[..., 3:7], 0, None))
+
+
+def profile_depth(dem, profile):
+    """Piecewise-linear depth from the sampled elevation profile, per pixel.
+    Replaces the old single-anchor straight-line extrapolation."""
+    E = [float(e) for e in PROFILE_ELEVS]
+    p = [profile[..., k] for k in range(len(E))]
+    d = np.zeros_like(dem)
+
+    lo_slope = (p[1] - p[0]) / (E[1] - E[0])
+    d = np.where(dem <= E[0], p[0] + lo_slope * (dem - E[0]), d)
+    for k in range(len(E) - 1):
+        m = (dem > E[k]) & (dem <= E[k + 1])
+        t = (dem - E[k]) / (E[k + 1] - E[k])
+        d = np.where(m, p[k] * (1 - t) + p[k + 1] * t, d)
+    hi_slope = (p[-1] - p[-2]) / (E[-1] - E[-2])
+    d = np.where(dem > E[-1], p[-1] + hi_slope * (dem - E[-1]), d)
+    return np.clip(d, 0, 800)
 
 
 # ---- 3. DEM + terrain derivatives ------------------------------------------
@@ -323,20 +374,22 @@ def terrain(dem, bounds):
 
 # ---- 4. the model -----------------------------------------------------------
 def model(dem, f, slope, northness, doy):
-    base = np.clip(f["slope"] * (dem - f["snowline"]), 0, f["cap"])
+    # Base depth now comes from the SAMPLED profile rather than a line through one anchor.
+    base = profile_depth(dem, f["profile"])
     aspect_factor = 1.0 + ASPECT_STRENGTH * northness
     slope_factor = 1.0 - SLOPE_SHED * np.clip((slope - 22.0) / 40.0, 0, 1)
-    cold = (dem > f["snowline"]).astype(float)
-    fresh = FRESH_GAIN * f["fresh"] * cold
 
-    # temperature above freezing by altitude (positive => melt)
+    # Fresh snow lands where it is cold enough — freezing level is the right variable
+    # for THIS, unlike for snow cover.
+    fresh = FRESH_GAIN * f["fresh"] * (dem > f["freezing"] - 150.0).astype(float)
+
     t_above = LAPSE_C_PER_KM * (f["freezing"] - dem) / 1000.0
     south = np.clip(0.5 - 0.5 * northness, 0, 1)              # 0 N .. 1 S
     season = 0.7 + 0.6 * max(0.0, math.sin(math.pi * (doy - 60) / 180.0))  # peaks in spring
     melt = MELT_CM_PER_DEGDAY * WINDOW_DAYS * np.maximum(0, t_above) * (0.5 + 0.9 * south) * season
 
     depth = base * aspect_factor * slope_factor + fresh - melt
-    return np.clip(depth, 0, f["cap"])
+    return np.clip(depth, 0, 800)
 
 
 def save_state(depth, bounds):
@@ -396,8 +449,8 @@ def bake_one(d, dem, bounds, grid, prev, terr):
     depth = model(dem, f, slope, northness, doy)
     if prev is not None:
         evolved = prev + FRESH_GAIN * f["fresh"] * (depth > 0)
-        depth = np.clip(STATE_BLEND * np.clip(evolved, 0, f["cap"]) +
-                        (1 - STATE_BLEND) * depth, 0, f["cap"])
+        depth = np.clip(STATE_BLEND * np.clip(evolved, 0, 800) +
+                        (1 - STATE_BLEND) * depth, 0, 800)
     sparkle = np.clip(f["fresh"] / 15.0, 0, 1) * (depth > 0)
     rgba = colourise(depth, sparkle)
     tag = d.strftime("%Y%m%d")
