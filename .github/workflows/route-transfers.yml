@@ -1,0 +1,29 @@
+name: Route airport transfers
+
+# Manual only. Driving times change on the timescale of road building, not weather, so
+# there is no reason to hammer a free community routing server on a schedule.
+on:
+  workflow_dispatch:
+
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      # ~210 requests at 1.1s apart, plus routing time. Well inside the default timeout,
+      # but set it explicitly so a hung server fails the job instead of burning an hour.
+      - name: Route each resort to its three nearest airports
+        timeout-minutes: 25
+        run: python3 route_transfers.py
+
+      - name: Publish transfers.json to the 'transfers' release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: transfers
+          name: Airport transfer times
+          files: transfers.json
+          fail_on_unmatched_files: true

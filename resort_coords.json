@@ -1,0 +1,422 @@
+[
+ {
+  "id": "verbier",
+  "name": "Verbier",
+  "lat": 46.096,
+  "lon": 7.228
+ },
+ {
+  "id": "zermatt",
+  "name": "Zermatt",
+  "lat": 46.02,
+  "lon": 7.748
+ },
+ {
+  "id": "val-disere",
+  "name": "Val d'Isère",
+  "lat": 45.448,
+  "lon": 6.98
+ },
+ {
+  "id": "st-anton",
+  "name": "St. Anton",
+  "lat": 47.13,
+  "lon": 10.263
+ },
+ {
+  "id": "chamonix",
+  "name": "Chamonix",
+  "lat": 45.923,
+  "lon": 6.871
+ },
+ {
+  "id": "solden",
+  "name": "Sölden",
+  "lat": 46.967,
+  "lon": 11.007
+ },
+ {
+  "id": "davos",
+  "name": "Davos",
+  "lat": 46.803,
+  "lon": 9.836
+ },
+ {
+  "id": "cervinia",
+  "name": "Cervinia",
+  "lat": 45.936,
+  "lon": 7.629
+ },
+ {
+  "id": "engelberg",
+  "name": "Engelberg",
+  "lat": 46.821,
+  "lon": 8.401
+ },
+ {
+  "id": "ischgl",
+  "name": "Ischgl",
+  "lat": 47.012,
+  "lon": 10.291
+ },
+ {
+  "id": "hintertux",
+  "name": "Hintertux",
+  "lat": 47.085,
+  "lon": 11.664
+ },
+ {
+  "id": "saas-fee",
+  "name": "Saas-Fee",
+  "lat": 46.108,
+  "lon": 7.927
+ },
+ {
+  "id": "les-2-alpes",
+  "name": "Les 2 Alpes",
+  "lat": 45.01,
+  "lon": 6.124
+ },
+ {
+  "id": "stelvio",
+  "name": "Passo Stelvio",
+  "lat": 46.529,
+  "lon": 10.453
+ },
+ {
+  "id": "courchevel",
+  "name": "Courchevel",
+  "lat": 45.415,
+  "lon": 6.634
+ },
+ {
+  "id": "meribel",
+  "name": "Méribel",
+  "lat": 45.396,
+  "lon": 6.565
+ },
+ {
+  "id": "val-thorens",
+  "name": "Val Thorens",
+  "lat": 45.298,
+  "lon": 6.58
+ },
+ {
+  "id": "tignes",
+  "name": "Tignes",
+  "lat": 45.468,
+  "lon": 6.906
+ },
+ {
+  "id": "les-arcs",
+  "name": "Les Arcs",
+  "lat": 45.572,
+  "lon": 6.828
+ },
+ {
+  "id": "la-plagne",
+  "name": "La Plagne",
+  "lat": 45.507,
+  "lon": 6.677
+ },
+ {
+  "id": "alpe-dhuez",
+  "name": "Alpe d'Huez",
+  "lat": 45.09,
+  "lon": 6.069
+ },
+ {
+  "id": "avoriaz",
+  "name": "Avoriaz",
+  "lat": 46.192,
+  "lon": 6.77
+ },
+ {
+  "id": "st-moritz",
+  "name": "St. Moritz",
+  "lat": 46.498,
+  "lon": 9.838
+ },
+ {
+  "id": "laax",
+  "name": "Laax",
+  "lat": 46.808,
+  "lon": 9.258
+ },
+ {
+  "id": "grindelwald",
+  "name": "Grindelwald",
+  "lat": 46.624,
+  "lon": 8.041
+ },
+ {
+  "id": "andermatt",
+  "name": "Andermatt",
+  "lat": 46.635,
+  "lon": 8.594
+ },
+ {
+  "id": "crans-montana",
+  "name": "Crans-Montana",
+  "lat": 46.308,
+  "lon": 7.478
+ },
+ {
+  "id": "kitzbuhel",
+  "name": "Kitzbühel",
+  "lat": 47.446,
+  "lon": 12.392
+ },
+ {
+  "id": "mayrhofen",
+  "name": "Mayrhofen",
+  "lat": 47.167,
+  "lon": 11.868
+ },
+ {
+  "id": "lech-zurs",
+  "name": "Lech Zürs",
+  "lat": 47.208,
+  "lon": 10.143
+ },
+ {
+  "id": "saalbach",
+  "name": "Saalbach",
+  "lat": 47.39,
+  "lon": 12.636
+ },
+ {
+  "id": "obergurgl",
+  "name": "Obergurgl",
+  "lat": 46.867,
+  "lon": 11.027
+ },
+ {
+  "id": "cortina",
+  "name": "Cortina d'Ampezzo",
+  "lat": 46.54,
+  "lon": 12.135
+ },
+ {
+  "id": "val-gardena",
+  "name": "Val Gardena",
+  "lat": 46.555,
+  "lon": 11.76
+ },
+ {
+  "id": "madonna",
+  "name": "Madonna di Campiglio",
+  "lat": 46.23,
+  "lon": 10.826
+ },
+ {
+  "id": "livigno",
+  "name": "Livigno",
+  "lat": 46.538,
+  "lon": 10.135
+ },
+ {
+  "id": "sestriere",
+  "name": "Sestriere",
+  "lat": 44.957,
+  "lon": 6.88
+ },
+ {
+  "id": "serre-chevalier",
+  "name": "Serre Chevalier",
+  "lat": 44.943,
+  "lon": 6.556
+ },
+ {
+  "id": "les-menuires",
+  "name": "Les Menuires",
+  "lat": 45.324,
+  "lon": 6.54
+ },
+ {
+  "id": "la-clusaz",
+  "name": "La Clusaz",
+  "lat": 45.905,
+  "lon": 6.424
+ },
+ {
+  "id": "megeve",
+  "name": "Megève",
+  "lat": 45.857,
+  "lon": 6.617
+ },
+ {
+  "id": "flaine",
+  "name": "Flaine",
+  "lat": 46.009,
+  "lon": 6.689
+ },
+ {
+  "id": "morzine",
+  "name": "Morzine",
+  "lat": 46.18,
+  "lon": 6.71
+ },
+ {
+  "id": "la-grave",
+  "name": "La Grave",
+  "lat": 45.046,
+  "lon": 6.307
+ },
+ {
+  "id": "montgenevre",
+  "name": "Montgenèvre",
+  "lat": 44.932,
+  "lon": 6.723
+ },
+ {
+  "id": "vars",
+  "name": "Vars",
+  "lat": 44.585,
+  "lon": 6.683
+ },
+ {
+  "id": "wengen",
+  "name": "Wengen",
+  "lat": 46.605,
+  "lon": 7.922
+ },
+ {
+  "id": "murren",
+  "name": "Mürren",
+  "lat": 46.56,
+  "lon": 7.892
+ },
+ {
+  "id": "adelboden",
+  "name": "Adelboden",
+  "lat": 46.492,
+  "lon": 7.557
+ },
+ {
+  "id": "gstaad",
+  "name": "Gstaad",
+  "lat": 46.472,
+  "lon": 7.287
+ },
+ {
+  "id": "arosa",
+  "name": "Arosa",
+  "lat": 46.783,
+  "lon": 9.679
+ },
+ {
+  "id": "lenzerheide",
+  "name": "Lenzerheide",
+  "lat": 46.729,
+  "lon": 9.558
+ },
+ {
+  "id": "nendaz",
+  "name": "Nendaz",
+  "lat": 46.183,
+  "lon": 7.31
+ },
+ {
+  "id": "grimentz",
+  "name": "Grimentz-Zinal",
+  "lat": 46.18,
+  "lon": 7.573
+ },
+ {
+  "id": "klosters",
+  "name": "Klosters",
+  "lat": 46.869,
+  "lon": 9.879
+ },
+ {
+  "id": "zell-am-see",
+  "name": "Zell am See",
+  "lat": 47.323,
+  "lon": 12.798
+ },
+ {
+  "id": "kaprun",
+  "name": "Kaprun · Kitzsteinhorn",
+  "lat": 47.27,
+  "lon": 12.758
+ },
+ {
+  "id": "serfaus",
+  "name": "Serfaus-Fiss-Ladis",
+  "lat": 47.038,
+  "lon": 10.607
+ },
+ {
+  "id": "stubai",
+  "name": "Stubai Glacier",
+  "lat": 47.009,
+  "lon": 11.127
+ },
+ {
+  "id": "zillertal-arena",
+  "name": "Zillertal Arena",
+  "lat": 47.231,
+  "lon": 11.884
+ },
+ {
+  "id": "warth-schrocken",
+  "name": "Warth-Schröcken",
+  "lat": 47.257,
+  "lon": 10.181
+ },
+ {
+  "id": "courmayeur",
+  "name": "Courmayeur",
+  "lat": 45.792,
+  "lon": 6.974
+ },
+ {
+  "id": "la-thuile",
+  "name": "La Thuile",
+  "lat": 45.713,
+  "lon": 6.949
+ },
+ {
+  "id": "monterosa",
+  "name": "Monterosa Ski",
+  "lat": 45.853,
+  "lon": 7.938
+ },
+ {
+  "id": "bormio",
+  "name": "Bormio",
+  "lat": 46.468,
+  "lon": 10.37
+ },
+ {
+  "id": "passo-tonale",
+  "name": "Passo Tonale",
+  "lat": 46.26,
+  "lon": 10.588
+ },
+ {
+  "id": "alta-badia",
+  "name": "Alta Badia",
+  "lat": 46.552,
+  "lon": 11.873
+ },
+ {
+  "id": "kronplatz",
+  "name": "Kronplatz",
+  "lat": 46.737,
+  "lon": 11.939
+ },
+ {
+  "id": "garmisch",
+  "name": "Garmisch-Partenkirchen",
+  "lat": 47.492,
+  "lon": 11.102
+ },
+ {
+  "id": "oberstdorf",
+  "name": "Oberstdorf",
+  "lat": 47.41,
+  "lon": 10.279
+ }
+]
