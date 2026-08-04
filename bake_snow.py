@@ -28,6 +28,7 @@ Env knobs:
   DEM_ZOOM       terrarium tile zoom (default 9 ≈ 215 m/px; 10 ≈ 108 m/px = 4× the tiles)
 """
 import os, math, datetime, subprocess, io, sys, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 import rasterio
@@ -53,6 +54,15 @@ PROFILE_ELEVS = (1000, 1750, 2500, 3250, 4000)
 # sub-centimetre "snow" across the valleys: the first corrected bake reported 55.8% coverage
 # with p10 and p25 both rounding to 0 cm.
 MIN_COVER_CM = 3.0
+# Concurrent Open-Meteo requests. Their free tier allows 600/minute; this is 6.
+SAMPLE_WORKERS = int(os.environ.get("SAMPLE_WORKERS", "6"))
+# Ceiling on a SAMPLED profile depth. Open-Meteo's snow_depth over permanent ice is an
+# artefact: the land model accumulates snow on a glacier cell with no ice dynamics and no
+# summer floor, so it drifts upward without bound. The 2025-01-15 bake showed it plainly -
+# p90 was 109 cm and p99 was 800 cm, the clip ceiling, a bimodal jump that is the high
+# glaciers pinned at the limit rather than any real gradient. 450 cm is a defensible deep
+# mid-winter pack on a high Alpine glacier plateau; beyond that we are drawing model drift.
+MAX_PROFILE_CM = float(os.environ.get("MAX_PROFILE_CM", "450"))
 DEM_MAX_WIDTH = 2400                   # only used by the SRTM fallback
 MIN_ZOOM = int(os.environ.get("SNOW_MIN_ZOOM", "5"))
 MAX_ZOOM = int(os.environ.get("SNOW_MAX_ZOOM", "11"))
@@ -76,30 +86,33 @@ DEM_ZOOM = int(os.environ.get("DEM_ZOOM", "9"))
 # state into the profile model dilutes the correction back to about a third of itself and
 # hides the fix. Bump this whenever the depth model changes; state written by any other
 # version is ignored rather than blended in.
-MODEL_VERSION = "2026-08-04-elevation-profile-4000m"
+MODEL_VERSION = "2026-08-04-profile-4000m-capped"
 IGNORE_STATE = os.environ.get("SNOW_IGNORE_STATE") == "1"
 
 STATE_TIF = "snow-state.tif"           # persisted depth (cm) for accumulation
 
-# Depth-coded ramp (depth cm -> rgb) — DARKER = DEEPER. Thin snow is near-white,
+# Depth-coded ramp (depth cm -> rgb) - DARKER = DEEPER. Thin snow is near-white,
 # deepening through blues to dark navy-indigo. 0 cm transparent via alpha (green
 # valleys come from the app's valley layer under this raster).
-# RAMP — PROVISIONAL, re-measure after the first corrected bake.
-# The 0-250 cm fit made on 2026-08-03 was calibrated against the OLD single-anchor model,
-# which under-read high ground ~3.8x (47 cm vs 180 cm at 2500 m). With the elevation-profile
-# model the same terrain reports roughly 3-4x more, so that ramp would saturate to flat navy.
-# Widened to a physically sensible Alpine winter range (0-400 cm) as an interim.
-# TO RE-FIT: bake a January date, then sample the tiles and read off the depth histogram —
-# fit the stops to the measured median / p90 / max exactly as before. Do not guess.
+#
+# FITTED, not guessed. Stops sit on the measured percentiles of the 2025-01-15 bake
+# (551-point sample, terrarium z9 DEM):
+#     p10 7, p25 17, median 38, p75 67, p90 109 cm, over 32.1% coverage
+# That is equal-frequency binning up to p90, so the colour actually varies where the data
+# is instead of most of the map sitting in one band. The last two stops cover the glacier
+# tail up to MAX_PROFILE_CM.
+#
+# TO RE-FIT after a model change: read the DEPTH line out of the bake log and move the
+# stops onto the new percentiles. Do not guess.
 RAMP = [
-    (0,   (250, 252, 254)),   # trace: bright white
-    (15,  (226, 239, 251)),
-    (45,  (190, 220, 248)),   # pale ice-blue
-    (90,  (140, 190, 240)),   # light-mid blue
-    (150, ( 96, 152, 224)),   # mid blue
-    (230, ( 64, 108, 200)),
-    (320, ( 44,  64, 160)),   # deep indigo
-    (400, ( 34,  38, 116)),   # deepest: dark navy
+    (3,   (250, 252, 254)),   # cover floor: bright white
+    (7,   (236, 244, 252)),   # p10
+    (17,  (214, 233, 250)),   # p25 - pale ice-blue
+    (38,  (170, 207, 245)),   # median
+    (67,  (122, 175, 235)),   # p75 - mid blue
+    (109, ( 80, 132, 214)),   # p90
+    (200, ( 52,  84, 180)),   # deep indigo
+    (450, ( 34,  38, 116)),   # glacier ceiling: dark navy
 ]
 
 
@@ -150,33 +163,33 @@ def fetch_samples(end_date):
     lats, lons = _sample_grid()
     n = len(lats)
     CH = 50
+    ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 
-    # Pass A — depth profile. Only the final value is used, so ask for ONE day per
-    # elevation rather than the whole window; that keeps 4 sweeps cheaper than the
-    # single window request this replaces.
+    # These 72 requests used to run one after another and took 19 of the bake's 25 minutes,
+    # which made every model tweak a 25-minute round trip. They are independent, so run them
+    # concurrently. Open-Meteo's free tier allows 600 calls/minute; 6 in flight is nowhere
+    # near it, and keeps us a polite neighbour rather than the reason they add a limit.
     prof = [[0.0] * n for _ in PROFILE_ELEVS]
-    for k, E in enumerate(PROFILE_ELEVS):
-        for i in range(0, n, CH):
-            la, lo = lats[i:i + CH], lons[i:i + CH]
-            arr = _get_json("https://archive-api.open-meteo.com/v1/archive", {
-                "latitude": ",".join(map(str, la)), "longitude": ",".join(map(str, lo)),
-                "elevation": ",".join([str(E)] * len(la)),
-                "start_date": end, "end_date": end,
-                "hourly": "snow_depth", "timezone": "UTC",
-            })
-            arr = arr if isinstance(arr, list) else [arr]
-            for j, loc in enumerate(arr):
-                sd = [v for v in ((loc.get("hourly") or {}).get("snow_depth") or [])
-                      if v is not None] or [0]
-                prof[k][i + j] = max(0.0, sd[-1] * 100.0)     # snow_depth is metres
-        print(f"  depth profile {E} m done"); sys.stdout.flush()
-
-    # Pass B — fresh snow + freezing level over the look-back window (elevation-independent).
     fresh = [0.0] * n
     freez = [0.0] * n
-    for i in range(0, n, CH):
+
+    def depth_job(k, E, i):
         la, lo = lats[i:i + CH], lons[i:i + CH]
-        arr = _get_json("https://archive-api.open-meteo.com/v1/archive", {
+        arr = _get_json(ARCHIVE, {
+            "latitude": ",".join(map(str, la)), "longitude": ",".join(map(str, lo)),
+            "elevation": ",".join([str(E)] * len(la)),
+            "start_date": end, "end_date": end,
+            "hourly": "snow_depth", "timezone": "UTC",
+        })
+        arr = arr if isinstance(arr, list) else [arr]
+        for j, loc in enumerate(arr):
+            sd = [v for v in ((loc.get("hourly") or {}).get("snow_depth") or [])
+                  if v is not None] or [0]
+            prof[k][i + j] = min(MAX_PROFILE_CM, max(0.0, sd[-1] * 100.0))   # metres -> cm
+
+    def forcing_job(i):
+        la, lo = lats[i:i + CH], lons[i:i + CH]
+        arr = _get_json(ARCHIVE, {
             "latitude": ",".join(map(str, la)), "longitude": ",".join(map(str, lo)),
             "start_date": start, "end_date": end,
             "hourly": "snowfall,freezing_level_height", "timezone": "UTC",
@@ -188,7 +201,20 @@ def fetch_samples(end_date):
             fz = [v for v in (h.get("freezing_level_height") or []) if v is not None] or [0]
             fresh[i + j] = max(0.0, sum(sf))                  # snowfall is cm
             freez[i + j] = float(np.mean(fz))
-        print(f"  forcings {min(i + CH, n)}/{n}"); sys.stdout.flush()
+
+    jobs = [(depth_job, (k, E, i))
+            for k, E in enumerate(PROFILE_ELEVS) for i in range(0, n, CH)]
+    jobs += [(forcing_job, (i,)) for i in range(0, n, CH)]
+    print(f"sampling {n} points: {len(jobs)} requests, {SAMPLE_WORKERS} at a time")
+    sys.stdout.flush()
+    done = 0
+    with ThreadPoolExecutor(max_workers=SAMPLE_WORKERS) as pool:
+        futures = [pool.submit(fn, *args) for fn, args in jobs]
+        for f in as_completed(futures):
+            f.result()          # re-raises; _get_json has already retried 4 times
+            done += 1
+            if done % 12 == 0 or done == len(jobs):
+                print(f"  {done}/{len(jobs)}"); sys.stdout.flush()
 
     out = []
     for i in range(n):
