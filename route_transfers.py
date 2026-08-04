@@ -13,14 +13,28 @@ terrain fetches worked fine from the same script and made this look like a serve
 Actions runners have a modern Python and unrestricted egress, so the routing just works
 here. Output is published as a release asset the app repo can pull, rather than needing
 anyone's laptop to be able to speak TLS 1.3.
+
+WINTER
+------
+OSRM routes the road graph as it stands today, with no idea which of those roads spend the
+ski season under four metres of snow. The first run of this script, in August, returned
+Turin -> Val d'Isere as 148 km / 2h18 over Mont Cenis and the Col de l'Iseran; in January
+that drive is nearer 300 km and four hours, because both are shut. So the route geometry
+is now checked against winter_passes.CLOSED and a gateway reached over a closed pass is
+not offered. To absorb the ones that get thrown away we route the six nearest airports and
+keep the three fastest survivors, rather than routing three and hoping.
 """
 import json, math, os, sys, time, urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from winter_passes import blocked_by, decode
 
 # The project-OSRM demo server refuses TLS outright now. This instance is run by FOSSGIS
 # for the OSM community; spot-checked Geneva->Verbier at 2h12 over 162km, which is right.
 OSRM = "https://routing.openstreetmap.de/routed-car/route/v1/driving"
 UA = "bluebird-transfers/1.0 (jacob.wise2@gmail.com)"
-CANDIDATES = 3          # route the three nearest gateways and keep them all
+CANDIDATES = 6          # route the six nearest gateways...
+KEEP = 3                # ...and keep the three fastest that are open in winter
 GAP = 1.1               # seconds between requests - a free community server, be polite
 
 AIRPORTS = {
@@ -36,6 +50,7 @@ AIRPORTS = {
 }
 
 FAILED = []
+REJECTED = []           # (resort, code, minutes, pass name) - printed so it can be audited
 
 
 def haversine(a, b, c, d):
@@ -47,7 +62,11 @@ def haversine(a, b, c, d):
 
 
 def drive(alat, alon, rlat, rlon, tries=4):
-    url = f"{OSRM}/{alon},{alat};{rlon},{rlat}?overview=false"
+    """Minutes, km and the road geometry. Full geometry, not simplified: a simplified
+    overview can drop the vertices either side of a summit, which is exactly where the
+    closed-pass check needs points."""
+    url = (f"{OSRM}/{alon},{alat};{rlon},{rlat}"
+           "?overview=full&geometries=polyline")
     last = None
     for attempt in range(tries):
         try:
@@ -58,29 +77,42 @@ def drive(alat, alon, rlat, rlon, tries=4):
             if d.get("code") != "Ok" or not d.get("routes"):
                 raise RuntimeError(f"OSRM code={d.get('code')!r}")
             route = d["routes"][0]
-            return int(round(route["duration"] / 60.0)), round(route["distance"] / 1000.0)
+            pts = decode(route.get("geometry") or "")
+            # A route with no geometry cannot be checked for closed passes, and an
+            # unchecked route is the thing this whole pass exists to avoid. Retry it.
+            if not pts:
+                raise RuntimeError("route came back without geometry")
+            return (int(round(route["duration"] / 60.0)),
+                    round(route["distance"] / 1000.0), pts)
         except Exception as ex:                                  # noqa: BLE001
             last = ex
             if attempt < tries - 1:
                 time.sleep(4 * (attempt + 1))
     print(f"    failed: {last}", flush=True)
-    return None, None
+    return None, None, None
 
 
 def main():
     resorts = json.load(open("resort_coords.json"))
-    print(f"routing {len(resorts)} resorts x {CANDIDATES} gateways\n", flush=True)
+    print(f"routing {len(resorts)} resorts x {CANDIDATES} gateways, "
+          f"keeping the {KEEP} fastest open in winter\n", flush=True)
     out = {}
     for i, r in enumerate(resorts, 1):
         near = sorted(AIRPORTS.items(),
                       key=lambda kv: haversine(r["lat"], r["lon"], kv[1][1], kv[1][2]))
         opts = []
         for code, (nm, alat, alon) in near[:CANDIDATES]:
-            mins, km = drive(alat, alon, r["lat"], r["lon"])
-            if mins:
-                opts.append({"code": code, "airport": nm, "minutes": mins, "km": km})
+            mins, km, pts = drive(alat, alon, r["lat"], r["lon"])
             time.sleep(GAP)
+            if not mins:
+                continue
+            shut = blocked_by(pts)
+            if shut:
+                REJECTED.append((r["name"], code, mins, shut))
+                continue
+            opts.append({"code": code, "airport": nm, "minutes": mins, "km": km})
         opts.sort(key=lambda o: o["minutes"])
+        opts = opts[:KEEP]
         out[r["id"]] = opts
         if opts:
             b = opts[0]
@@ -89,7 +121,14 @@ def main():
                   + (f"  (+{len(opts)-1} more)" if len(opts) > 1 else ""), flush=True)
         else:
             FAILED.append(r["name"])
-            print(f"[{i}/{len(resorts)}] {r['name'][:24]:24s} -- no route --", flush=True)
+            print(f"[{i}/{len(resorts)}] {r['name'][:24]:24s} -- no winter route --", flush=True)
+
+    # Every discarded gateway, so a wrong entry in winter_passes.CLOSED shows up as an
+    # obviously silly rejection in the log instead of quietly deleting good routes.
+    if REJECTED:
+        print(f"\n{len(REJECTED)} gateways dropped for a closed pass:")
+        for nm, code, mins, shut in REJECTED:
+            print(f"    {nm[:24]:24s} {code}  {mins:4d}min  via {shut}")
 
     # A resort with no gateway would silently keep its old hand-written guess. Say so
     # loudly rather than letting a partial result look complete.

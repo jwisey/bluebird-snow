@@ -17,10 +17,12 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
 
-      # ~210 requests at 1.1s apart, plus routing time. Well inside the default timeout,
-      # but set it explicitly so a hung server fails the job instead of burning an hour.
-      - name: Route each resort to its three nearest airports
-        timeout-minutes: 25
+      # ~420 requests at 1.1s apart, plus routing time: six candidate gateways per resort
+      # now, not three, because routes over passes that shut for the winter get discarded
+      # and there has to be something left to keep. Set explicitly so a hung server fails
+      # the job instead of burning an hour.
+      - name: Route each resort to six gateways, keep the three open in winter
+        timeout-minutes: 45
         run: python3 route_transfers.py
 
       # Upload before publishing. The first run routed all 70 resorts in 5m45s and then
