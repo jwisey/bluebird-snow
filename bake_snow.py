@@ -61,6 +61,15 @@ PREVIEW = SELFTEST or os.environ.get("SNOW_PREVIEW") == "1"
 DEM_SOURCE = os.environ.get("DEM_SOURCE", "terrarium")
 DEM_ZOOM = int(os.environ.get("DEM_ZOOM", "9"))
 
+# Stamped into snow-state.tif. The daily run blends STATE_BLEND (0.65) of yesterday's
+# persisted depth into today's model output. That is right for continuity between runs of
+# the SAME model and completely wrong across a model change: carrying the old single-anchor
+# state into the profile model dilutes the correction back to about a third of itself and
+# hides the fix. Bump this whenever the depth model changes; state written by any other
+# version is ignored rather than blended in.
+MODEL_VERSION = "2026-08-04-elevation-profile"
+IGNORE_STATE = os.environ.get("SNOW_IGNORE_STATE") == "1"
+
 STATE_TIF = "snow-state.tif"           # persisted depth (cm) for accumulation
 
 # Depth-coded ramp (depth cm -> rgb) — DARKER = DEEPER. Thin snow is near-white,
@@ -399,6 +408,7 @@ def save_state(depth, bounds):
                        dtype="float32", crs="EPSG:4326", transform=tr,
                        compress="deflate") as d:
         d.write(depth.astype("float32"), 1)
+        d.update_tags(model_version=MODEL_VERSION)
 
 
 # ---- 5. colourise + tile ----------------------------------------------------
@@ -451,6 +461,17 @@ def bake_one(d, dem, bounds, grid, prev, terr):
         evolved = prev + FRESH_GAIN * f["fresh"] * (depth > 0)
         depth = np.clip(STATE_BLEND * np.clip(evolved, 0, 800) +
                         (1 - STATE_BLEND) * depth, 0, 800)
+    # Log the distribution every run: the colour ramp is fitted to these numbers, so they
+    # need to be readable straight off the CI log rather than requiring a tile download.
+    pos = depth[depth > 0]
+    if pos.size:
+        q = np.percentile(pos, [10, 25, 50, 75, 90, 99])
+        print(f"DEPTH {d.isoformat()}  covered {100.0 * pos.size / depth.size:.1f}%  "
+              f"p10 {q[0]:.0f}  p25 {q[1]:.0f}  median {q[2]:.0f}  p75 {q[3]:.0f}  "
+              f"p90 {q[4]:.0f}  p99 {q[5]:.0f}  max {depth.max():.0f} cm")
+    else:
+        print(f"DEPTH {d.isoformat()}  no snow anywhere - check the sampling.")
+    sys.stdout.flush()
     sparkle = np.clip(f["fresh"] / 15.0, 0, 1) * (depth > 0)
     rgba = colourise(depth, sparkle)
     tag = d.strftime("%Y%m%d")
@@ -519,10 +540,19 @@ def main():
     else:
         d = bake_date()
         prev = None
-        if os.path.exists(STATE_TIF):
+        if IGNORE_STATE:
+            print("SNOW_IGNORE_STATE=1 - baking from the model alone, no carried state.")
+        elif os.path.exists(STATE_TIF):
             with rasterio.open(STATE_TIF) as ds:
-                prev = ds.read(1, out_shape=dem.shape,
-                               resampling=Resampling.bilinear).astype(float)
+                got = ds.tags().get("model_version")
+                if got == MODEL_VERSION:
+                    prev = ds.read(1, out_shape=dem.shape,
+                                   resampling=Resampling.bilinear).astype(float)
+                    print(f"Carried snow state from {STATE_TIF} (model {got}).")
+                else:
+                    print(f"Ignoring {STATE_TIF}: written by model '{got}', this is "
+                          f"'{MODEL_VERSION}'. Blending it would drag the new depths "
+                          f"back toward the old ones.")
         depth, pm = bake_one(d, dem, bounds, grid, prev, terr)
         save_state(depth, bounds)
         shutil.copy(pm, "alps-snow.pmtiles")
