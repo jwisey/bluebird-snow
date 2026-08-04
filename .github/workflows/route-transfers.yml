@@ -5,6 +5,9 @@ name: Route airport transfers
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write            # to publish transfers.json as a release asset
+
 jobs:
   route:
     runs-on: ubuntu-latest
@@ -19,6 +22,16 @@ jobs:
       - name: Route each resort to its three nearest airports
         timeout-minutes: 25
         run: python3 route_transfers.py
+
+      # Upload before publishing. The first run routed all 70 resorts in 5m45s and then
+      # threw the lot away because the release step lacked contents:write - six minutes
+      # of a free community server's time wasted on a permissions omission. An artifact
+      # survives whatever the publish step does.
+      - name: Keep the result regardless of what happens next
+        uses: actions/upload-artifact@v4
+        with:
+          name: transfers
+          path: transfers.json
 
       - name: Publish transfers.json to the 'transfers' release
         uses: softprops/action-gh-release@v2
